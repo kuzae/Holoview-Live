@@ -1,0 +1,25 @@
+﻿<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="HoloStreamScheduleApp.MainPage"
+             NavigationPage.HasNavigationBar="False">
+    <Grid x:Name="MainContainerGrid" RowDefinitions="1*, Auto" ColumnDefinitions="4*, 1*">
+        <!-- Video Player -->
+        <ContentView x:Name="VideoContainer"
+                     Grid.Row="0"
+                     Grid.Column="0"
+                     VerticalOptions="FillAndExpand"
+                     BackgroundColor="Black">
+        </ContentView>
+        <!-- Schedule List -->
+        <ScrollView x:Name="ScheduleContainer"
+                    Grid.Row="0"
+                    Grid.Column="1">
+        </ScrollView>
+        <!-- Dynamic Grid with RefreshView -->
+        <ScrollView x:Name="GridContainer"
+                    VerticalOptions="FillAndExpand"
+                    HorizontalOptions="FillAndExpand">
+        </ScrollView>
+    </Grid>
+</ContentPage>
