@@ -1,6 +1,4 @@
 ﻿using HoloStreamScheduleApp.Services;
-using System.IO;
-
 namespace HoloStreamScheduleApp;
 
 public partial class MainPage : ContentPage
@@ -12,38 +10,26 @@ public partial class MainPage : ContentPage
     private const int frameMaxHeight = 400;
     private const int minColumns = 2;
     private List<StreamItem> _cachedStreams = new();
-    private CancellationTokenSource _resizeCancellationTokenSource;
     private readonly string _logFilePath;
-    private WebView? _videoPlayer;
-    private bool _isVideoPlayerActive = false;
-    private string labelText;
-    private CancellationTokenSource _timerCancellationTokenSource;
-
-
 
     public MainPage()
     {
         InitializeComponent();
-        _logFilePath = @"C:\Users\kuz\source\repos\HoloStreamScheduleApp\HoloStreamScheduleApp\Logs\AppLog.txt";
-        Directory.CreateDirectory(Path.GetDirectoryName(_logFilePath)!);
-        if (!File.Exists(_logFilePath)) File.WriteAllText(_logFilePath, "");
-        LogToFile("Application Started...");
+        InitializeApp();
+    }
+
+    private void InitializeApp()
+    {
+        Layout1.IsVisible = true;
+        Layout2.IsVisible = false;
+        Title = string.Empty;
         InitializeStreamsAsync();
     }
-    private async void InitializeStreamsAsync()
+    private async Task InitializeStreamsAsync()
     {
-
-        Title = string.Empty;
         await FetchStreamsAsync();
-        Dispatcher.Dispatch(() =>
-        {
-            LoadGrid();
-            LoadSchedule();
-            GridContainer.ForceLayout();
-            ScheduleContainer.ForceLayout();
-        });
-        StartGridReloadTimer();
-        SizeChanged += OnPageSizeChanged;
+        LoadGrid(Layout1Mode: true); // Initial grid load for Layout1
+        LoadSchedule(ScheduleContainer); // Load schedule for Layout1
     }
     private async Task FetchStreamsAsync()
     {
@@ -55,9 +41,29 @@ public partial class MainPage : ContentPage
 
             LogToFile($"Fetched {_cachedStreams.Count} streams.");
 
+            // Filter the streams: remove streams that have passed and are not live
+            var now = DateTime.UtcNow;
+            var filteredStreams = _cachedStreams.Where(stream =>
+            {
+                if (DateTime.TryParseExact(stream.Start, "MM.dd HH:mm", null, System.Globalization.DateTimeStyles.None, out var startTime))
+                {
+                    var utcStartTime = TimeZoneInfo.ConvertTimeToUtc(startTime, TimeZoneInfo.FindSystemTimeZoneById("Tokyo Standard Time"));
+                    return utcStartTime >= now.AddMinutes(-15) || stream.LiveStatus == "Live";
+                }
+                else
+                {
+                    LogToFile($"Invalid start time format for stream: {stream.Name} - {stream.Start}");
+                    return false;
+                }
+            }).ToList();
+
+            LogToFile($"Filtered streams: {filteredStreams.Count} streams remaining after filtering.");
+
+            _cachedStreams = filteredStreams;
+
             if (_cachedStreams.Count == 0)
             {
-                LogToFile("No streams found.");
+                LogToFile("No valid streams found after filtering.");
             }
         }
         catch (Exception ex)
@@ -65,56 +71,47 @@ public partial class MainPage : ContentPage
             LogToFile($"Error fetching streams: {ex.Message}");
         }
     }
-    private async void StartGridReloadTimer()
-    {
-        _timerCancellationTokenSource = new CancellationTokenSource();
 
-        try
-        {
-            while (!_timerCancellationTokenSource.Token.IsCancellationRequested)
-            {
-                await FetchStreamsAsync();
-                await Task.Delay(TimeSpan.FromMinutes(30), _timerCancellationTokenSource.Token);
-            }
-        }
-        catch (TaskCanceledException) { /* Timer stopped */ }
+
+    private void OnReturnButtonClicked(object sender, EventArgs e)
+    {
+        CloseVideoPlayer(); // Ensures the video player is cleaned up
+        Layout1.IsVisible = true; // Show the first layout
+        Layout2.IsVisible = false; // Hide the video view
     }
 
-    private void LoadGrid()
+    private void LoadGrid(bool Layout1Mode)
     {
+        var container = Layout1Mode ? GridContainer : GridContainerLayout2;
+
         if (_cachedStreams == null || _cachedStreams.Count == 0)
         {
             LogToFile("No streams available to display.");
             return;
         }
-        if (GridContainer.Content is IDisposable disposableContent)
+
+        // Clear existing content
+        if (container.Content is IDisposable disposableContent)
         {
             disposableContent.Dispose();
         }
-        GridContainer.Content = null;
+        container.Content = null;
 
+        // Create and populate dynamic grid
         var dynamicGrid = new Grid
         {
-            BackgroundColor = Colors.White,
             RowDefinitions = new RowDefinitionCollection(),
             ColumnDefinitions = new ColumnDefinitionCollection(),
             VerticalOptions = LayoutOptions.Start
         };
 
-
-        // Log current Width, Height, and cached streams count
-        LogToFile($"GridContainer Width: {Width}, Height: {Height}");
-
-
-        double screenWidth = Width;
-        int columns = Math.Max(minColumns, (int)(screenWidth / frameMaxWidth));
+        int columns = Math.Max(minColumns, (int)(Width / frameMaxWidth));
         int rows = (_cachedStreams.Count + columns - 1) / columns;
 
         for (int i = 0; i < rows; i++)
         {
             dynamicGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         }
-
         for (int i = 0; i < columns; i++)
         {
             dynamicGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -129,42 +126,22 @@ public partial class MainPage : ContentPage
             dynamicGrid.Children.Add(gridItem);
         }
 
-
-        double rowHeight = frameMaxHeight; // Define the height of each row
-        dynamicGrid.HeightRequest = rows * rowHeight; // Total height of the grid
-
-        LogToFile("Grid loaded successfully.");
-
-        Dispatcher.Dispatch(async () =>
-        {
-            await Task.Delay(100); // Let the UI stabilize
-            if (_videoPlayer == null)
-            {
-                VideoContainer.Content = dynamicGrid;
-                MainContainerGrid.RowDefinitions[0].Height = new GridLength(rowHeight * rows);
-            }
-            else
-            {
-                GridContainer.Content = dynamicGrid;
-            }
-            VideoContainer.ForceLayout();
-            GridContainer.ForceLayout();
-            LogToFile($"Dynamic Grid Actual Width: {dynamicGrid.Width}, Height: {dynamicGrid.Height}");
-        });
-
+        container.Content = dynamicGrid;
+        container.ForceLayout();
     }
-
-    private void LoadSchedule()
+    private void LoadSchedule(ScrollView container)
     {
         if (_cachedStreams == null || _cachedStreams.Count == 0)
         {
+            LogToFile("No schedule available.");
             return;
         }
-        if (ScheduleContainer.Content is IDisposable disposableContent)
+
+        if (container.Content is IDisposable disposableContent)
         {
             disposableContent.Dispose();
         }
-        ScheduleContainer.Content = null;
+        container.Content = null;
 
         var stackLayout = new StackLayout
         {
@@ -173,77 +150,160 @@ public partial class MainPage : ContentPage
             VerticalOptions = LayoutOptions.Start
         };
 
-        bool isAlternate = false;
         var tokyoTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Tokyo Standard Time");
         var localTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+
+        bool isAlternate = false; // Used to alternate colors
+
         foreach (var stream in _cachedStreams)
         {
-            string labelText;
-            const string dateFormat = "MM.dd HH:mm";
+            var innerStack = new StackLayout
+            {
+                Padding = new Thickness(10, 5),
+                Spacing = 2,
+                VerticalOptions = LayoutOptions.Start
+            };
 
-            if (DateTime.TryParseExact(stream.Start, dateFormat, null, System.Globalization.DateTimeStyles.None, out var parsedStartTime))
+            if (DateTime.TryParseExact(stream.Start, "MM.dd HH:mm", null, System.Globalization.DateTimeStyles.None, out var parsedStartTime))
             {
                 var tokyoDateTime = TimeZoneInfo.ConvertTimeToUtc(parsedStartTime, tokyoTimeZone);
                 var localDateTime = TimeZoneInfo.ConvertTimeFromUtc(tokyoDateTime, localTimeZone);
 
-
                 if (stream.LiveStatus == "Live")
                 {
                     var liveDuration = DateTime.UtcNow - tokyoDateTime;
-                    labelText = $"(LIVE) {liveDuration.Hours:D2}:{liveDuration.Minutes:D2} - {stream.Name} - {stream.Text}";
+
+                    // Line 1: "(LIVE)" with stream duration
+                    innerStack.Children.Add(new Label
+                    {
+                        Text = $"(LIVE) {liveDuration.Hours:D2}:{liveDuration.Minutes:D2}",
+                        FontSize = 16,
+                        TextColor = Colors.Red,
+                        FontAttributes = FontAttributes.Bold
+                    });
+
+                    // Line 2: Stream name and description
+                    innerStack.Children.Add(new Label
+                    {
+                        Text = $"{stream.Name} - {stream.Text}",
+                        FontSize = 16
+                    });
                 }
                 else
                 {
-                    labelText = $"{localDateTime:MM.dd HH:mm} (EST) - {stream.Name} - {stream.Text}";
+                    // Line 1: Localized time
+                    innerStack.Children.Add(new Label
+                    {
+                        Text = $"{localDateTime:h:mm tt} (EST)",
+                        FontSize = 16
+                    });
+
+                    // Line 2: Stream name and description
+                    innerStack.Children.Add(new Label
+                    {
+                        Text = $"{stream.Name} - {stream.Text}",
+                        FontSize = 16
+                    });
                 }
             }
             else
             {
-                labelText = $"Invalid Start Time - {stream.Name} - {stream.Text}";
+                // Handle invalid start time
+                innerStack.Children.Add(new Label
+                {
+                    Text = "Invalid Start Time",
+                    FontSize = 16
+                });
+
+                innerStack.Children.Add(new Label
+                {
+                    Text = $"{stream.Name} - {stream.Text}",
+                    FontSize = 16
+                });
             }
 
-            var label = new Label
-            {
-                Text = labelText,
-                FontSize = 16,
-                TextColor = Colors.Black,
-                LineBreakMode = LineBreakMode.TailTruncation,
-                VerticalTextAlignment = TextAlignment.Center,
-                Padding = new Thickness(10, 5) // Add consistent padding inside the label
-            };
+            // Alternate background colors
+            var backgroundColor = isAlternate ? Colors.WhiteSmoke : Colors.LightGray;
+            isAlternate = !isAlternate; // Toggle the alternate flag
 
             var frame = new Frame
             {
-                Content = label,
-                BackgroundColor = isAlternate ? Colors.LightGray : Colors.White,
-                Padding = 0, // No extra padding for the frame
-                Margin = 0, // No margins for the frame
-                CornerRadius = 0, // Remove rounded corners
-                HasShadow = false // Disable shadows for cleaner appearance
+                Content = innerStack,
+                CornerRadius = 0,
+                BorderColor = Colors.Transparent,
+                BackgroundColor = backgroundColor,
+                HasShadow = false,
+                Margin = 0,
+                Padding = 0
             };
-
-            var tapGesture = new TapGestureRecognizer();
-            tapGesture.Tapped += (s, e) =>
-            {
-                if (!string.IsNullOrWhiteSpace(stream.Link))
-                {
-                    if (_videoPlayer != null)
-                    {
-                        CloseVideoPlayer();
-                    }
-
-                    LoadVideoPlayer(stream.Link);
-                }
-            };
-            frame.GestureRecognizers.Add(tapGesture);
 
             stackLayout.Children.Add(frame);
-            isAlternate = !isAlternate;
         }
 
-        ScheduleContainer.Content = stackLayout;
-        ScheduleContainer.ForceLayout();
+        container.Content = stackLayout;
+        container.ForceLayout();
     }
+
+
+    private void LoadVideo(string videoUrl)
+    {
+        CloseVideoPlayer(); // Ensure any previous player is cleaned up
+
+        Layout1.IsVisible = false;
+        Layout2.IsVisible = true;
+
+        var codepen = "https://cdpn.io/pen/debug/oNPzxKo?v=" + System.Text.RegularExpressions.Regex.Match(videoUrl, @"v=([^&]+)").Groups[1].Value + "&autoplay=0&mute=1";
+
+        var videoPlayer = new WebView
+        {
+            Source = new UrlWebViewSource { Url = codepen }
+        };
+
+        VideoContainer.Content = videoPlayer;
+
+        // Populate Grid and Schedule for Layout2
+        LoadGrid(Layout1Mode: false);
+        LoadSchedule(ScheduleContainerLayout2);
+    }
+
+    private void CloseVideoPlayer()
+    {
+        if (VideoContainer.Content is WebView videoPlayer)
+        {
+            videoPlayer.Source = new UrlWebViewSource { Url = "about:blank" };
+            videoPlayer.Handler?.DisconnectHandler();
+            VideoContainer.Content = null;
+        }
+
+        Layout1.IsVisible = true;
+        Layout2.IsVisible = false;
+    }
+
+    private void OnVideoTapped(object sender, EventArgs e)
+    {
+        if (sender is Grid grid && grid.BindingContext is StreamItem stream)
+        {
+            LoadVideo(stream.Link);
+        }
+        else if (sender is Frame frame && frame.BindingContext is StreamItem streamFromFrame)
+        {
+            LoadVideo(streamFromFrame.Link);
+        }
+    }
+
+    private void LogToFile(string message)
+    {
+        try
+        {
+            string logMessage = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}\n";
+            File.AppendAllText(_logFilePath, logMessage);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error writing to log file: {ex.Message}");
+        }
+    }
+
     private Frame CreateStreamCard(StreamItem stream)
     {
         var backgroundImage = new Image
@@ -269,7 +329,7 @@ public partial class MainPage : ContentPage
             Content = profileImage,
             Padding = 0,
             Margin = 0,
-            BackgroundColor = Colors.Transparent,
+            BorderColor = stream.LiveStatus == "Live" ? Colors.Red : Colors.Transparent,
             HasShadow = false
         };
 
@@ -297,7 +357,6 @@ public partial class MainPage : ContentPage
 
         var nameLabel = new Label
         {
-            Text = stream.Name + " - " + TimeZoneInfo.ConvertTimeFromUtc(DateTime.ParseExact(stream.Start, "MM.dd HH:mm", null), TimeZoneInfo.Local).ToString("MM.dd HH:mm"),
             TextColor = Colors.Black,
             FontSize = 20,
             FontAttributes = FontAttributes.Bold,
@@ -305,6 +364,22 @@ public partial class MainPage : ContentPage
             VerticalTextAlignment = TextAlignment.Start,
             Margin = new Thickness(5, 0, 0, 0)
         };
+
+        // Corrected time conversion
+        var tokyoTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Tokyo Standard Time");
+        var localTimeZone = TimeZoneInfo.Local;
+
+        if (DateTime.TryParseExact(stream.Start, "MM.dd HH:mm", null, System.Globalization.DateTimeStyles.None, out var parsedStartTime))
+        {
+            var tokyoDateTime = TimeZoneInfo.ConvertTimeToUtc(parsedStartTime, tokyoTimeZone);
+            var localDateTime = TimeZoneInfo.ConvertTimeFromUtc(tokyoDateTime, localTimeZone);
+
+            nameLabel.Text = $"{stream.Name} - {localDateTime:h:mm tt}";
+        }
+        else
+        {
+            nameLabel.Text = $"{stream.Name} - Invalid Time";
+        }
 
         var titleLabel = new Label
         {
@@ -338,6 +413,12 @@ public partial class MainPage : ContentPage
         grid.Children.Add(nameLabel);
         grid.Children.Add(durationLabel);
 
+        // Add the BindingContext for the frame or grid
+        grid.BindingContext = stream;
+        var tapGesture = new TapGestureRecognizer();
+        tapGesture.Tapped += OnVideoTapped; // Simplified event handler
+        grid.GestureRecognizers.Add(tapGesture);
+
         var frame = new Frame
         {
             Content = grid,
@@ -349,22 +430,6 @@ public partial class MainPage : ContentPage
             HasShadow = false
         };
 
-        var tapGesture = new TapGestureRecognizer();
-        tapGesture.Tapped += (s, e) =>
-        {
-            if (!string.IsNullOrWhiteSpace(stream.Link))
-            {
-                if (_videoPlayer != null)
-                {
-                    CloseVideoPlayer();
-                }
-
-                LoadVideoPlayer(stream.Link);
-            }
-        };
-
-        frame.GestureRecognizers.Add(tapGesture);
-
         if (stream.LiveStatus == "Live")
         {
             profileImage.Rotation = 0;
@@ -374,92 +439,5 @@ public partial class MainPage : ContentPage
         }
 
         return frame;
-    }
-
-    private void OnPageSizeChanged(object sender, EventArgs e)
-    {
-        if (_isVideoPlayerActive)
-        {
-            return; // Skip reloading the grid when the video player is active
-        }
-
-        _resizeCancellationTokenSource?.Cancel();
-        _resizeCancellationTokenSource?.Dispose();
-        _resizeCancellationTokenSource = new CancellationTokenSource();
-
-        _ = Task.Delay(200, _resizeCancellationTokenSource.Token).ContinueWith(task =>
-        {
-            if (!task.IsCanceled)
-            {
-                Dispatcher.Dispatch(() =>
-                {
-                    LoadGrid();
-                    LoadSchedule();
-                });
-            }
-        });
-    }
-    private string ExtractVideoId(string url)
-    {
-        var match = System.Text.RegularExpressions.Regex.Match(url, @"v=([^&]+)");
-        return match.Success ? match.Groups[1].Value : string.Empty;
-    }
-    private void LogToFile(string message)
-    {
-        try
-        {
-            string logMessage = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}\n";
-            File.AppendAllText(_logFilePath, logMessage);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error writing to log file: {ex.Message}");
-        }
-    }
-
-    private void LoadVideoPlayer(string videoUrl)
-    {
-        CloseVideoPlayer();
-
-        _isVideoPlayerActive = true; // Set the flag
-        if (MainContainerGrid.RowDefinitions.Count == 1)
-        {
-            MainContainerGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        }
-
-        var codepen = "https://cdpn.io/pen/debug/oNPzxKo?v=" + ExtractVideoId(videoUrl) + "&autoplay=0&mute=1";
-
-        _videoPlayer = new WebView { Source = new UrlWebViewSource { Url = codepen } };
-
-        VideoContainer.Content = _videoPlayer;
-        LoadGrid();
-        MainContainerGrid.RowDefinitions[0].Height = new GridLength(3, GridUnitType.Star); // First row takes 75%
-        MainContainerGrid.RowDefinitions[1].Height = new GridLength(1, GridUnitType.Star); // Second row takes 25%
-        LogToFile("Video player loaded successfully.");
-    }
-
-    private void CloseVideoPlayer()
-    {
-        if (_videoPlayer != null)
-        {
-            _videoPlayer.Source = new UrlWebViewSource { Url = "about:blank" };
-            MainContainerGrid.Children.Remove(_videoPlayer);
-            VideoContainer.Content = null;
-            _videoPlayer.Handler?.DisconnectHandler();
-            _videoPlayer = null;
-            LogToFile("Video player closed.");
-        }
-
-        _isVideoPlayerActive = false; // Reset the flag
-
-        // Reset grid layout
-        MainContainerGrid.RowDefinitions[0].Height = new GridLength(1, GridUnitType.Star);
-        MainContainerGrid.RowDefinitions[1].Height = new GridLength(1, GridUnitType.Star);
-    }
-    protected override void OnDisappearing()
-    {
-        base.OnDisappearing();
-        SizeChanged -= OnPageSizeChanged;
-        GridContainer.SizeChanged -= (s, e) => Console.WriteLine($"GridContainer size changed: {GridContainer.Width}x{GridContainer.Height}");
     }
 }
